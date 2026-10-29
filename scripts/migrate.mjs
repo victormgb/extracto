@@ -1,9 +1,10 @@
 // Migración idempotente que se ejecuta al arrancar la app (run_command).
-// Aplica db/init.sql en la BD enlazada. Si la extensión pgvector no está
-// disponible en la imagen gestionada, degrada el esquema (embedding como text)
-// en lugar de tumbar el arranque: el chat semántico perdería funciones, pero
-// la app, la subida, la validación, el chat SQL y los guardados siguen vivos.
-// Sin DATABASE_URL (p. ej. primer arranque antes de enlazar la BD) se omite.
+// Diseñada para el entorno gestionado:
+//  - Fail-fast: cada fase se registra y cualquier error termina el proceso
+//    con código distinto de cero para que el mensaje aparezca en los logs.
+//  - Sin DATABASE_URL (p. ej. primer arranque antes de enlazar la BD) se omite.
+//  - Si la extensión pgvector no está disponible, degrada el esquema
+//    (embedding como text) en lugar de tumbar el arranque.
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -18,6 +19,15 @@ if (!databaseUrl) {
   process.exit(0);
 }
 
+let target = "(URL no parseable)";
+try {
+  const parsed = new URL(databaseUrl);
+  target = `${parsed.hostname}:${parsed.port || "5432"}${parsed.pathname}`;
+} catch {
+  /* se deja el marcador */
+}
+console.log(`[migrate] iniciando → ${target} (pid ${process.pid})`);
+
 const here = path.dirname(fileURLToPath(import.meta.url));
 const sqlPath = path.join(here, "..", "db", "init.sql");
 const fullSql = readFileSync(sqlPath, "utf8");
@@ -26,14 +36,34 @@ const fullSql = readFileSync(sqlPath, "utf8");
 function degradedSql(sql) {
   return sql
     .replace(/vector\(1536\)/gi, "text")
-    .replace(
-      /CREATE INDEX IF NOT EXISTS documents_embedding_idx[\s\S]*?;/i,
-      ""
-    );
+    .replace(/CREATE INDEX IF NOT EXISTS documents_embedding_idx[\s\S]*?;/i, "");
 }
 
-const pool = new pg.Pool({ connectionString: databaseUrl, max: 2 });
-const client = await pool.connect();
+const pool = new pg.Pool({
+  connectionString: databaseUrl,
+  max: 2,
+  // Fail-fast: en vez de esperar en silencio si el TCP no llega
+  connectionTimeoutMillis: 15_000,
+  idleTimeoutMillis: 10_000,
+});
+pool.on("error", (error) => {
+  console.error(`[migrate] cliente inactivo con error: ${error.message}`);
+});
+
+let client;
+try {
+  client = await pool.connect();
+} catch (error) {
+  console.error(
+    `[migrate] NO SE PUDO CONECTAR a la base de datos: ${
+      error instanceof Error ? error.message : error
+    }`
+  );
+  await pool.end();
+  process.exit(1);
+}
+
+console.log("[migrate] conectado a PostgreSQL.");
 
 try {
   // 1. Extensión en su propia sentencia (auto-commit): fallo no fatal
@@ -47,9 +77,6 @@ try {
         error instanceof Error ? error.message : error
       }`
     );
-    console.error(
-      "[migrate] Se usará un esquema degradado (embedding como text): el chat semántico y los embeddings quedarán limitados."
-    );
   }
 
   // 2. Esquema completo (o degradado) en una transacción idempotente
@@ -60,16 +87,20 @@ try {
 
   console.log(
     vectorOk
-      ? "[migrate] esquema aplicado correctamente (pgvector + documents + document_data)."
-      : "[migrate] esquema degradado aplicado (sin pgvector)."
+      ? "[migrate] OK: esquema aplicado (pgvector + documents + document_data)."
+      : "[migrate] OK: esquema degradado aplicado (sin pgvector)."
   );
 } catch (error) {
   await client.query("ROLLBACK").catch(() => {});
   console.error(
-    `[migrate] ERROR: ${error instanceof Error ? error.message : error}`
+    `[migrate] ERROR DE ESQUEMA: ${
+      error instanceof Error ? error.message : error
+    }`
   );
-  process.exitCode = 1;
-} finally {
   client.release();
   await pool.end();
+  process.exit(1);
 }
+
+client.release();
+await pool.end();
