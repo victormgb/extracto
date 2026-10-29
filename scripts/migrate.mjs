@@ -27,6 +27,30 @@ try {
   /* se deja el marcador */
 }
 console.log(`[migrate] iniciando → ${target} (pid ${process.pid})`);
+console.log(
+  `[migrate] DATABASE_SSL=${JSON.stringify(process.env.DATABASE_SSL ?? null)}`
+);
+
+/** Igual que lib/db.ts: fuerza TLS en la URL (la sslmode de la URL gana en pg). */
+function withPlatformSsl(rawUrl) {
+  try {
+    const url = new URL(rawUrl);
+    const isManaged = url.hostname.endsWith(".run-on-seenode.com");
+    const forced = (process.env.DATABASE_SSL ?? "").toLowerCase() === "true";
+    if (isManaged || forced) {
+      url.searchParams.delete("sslmode");
+      url.searchParams.delete("ssl");
+      url.searchParams.set("sslmode", "no-verify");
+      return { url: url.toString(), ssl: true };
+    }
+  } catch {
+    /* URL no parseable: se usa tal cual */
+  }
+  return { url: rawUrl, ssl: false };
+}
+
+const prepared = withPlatformSsl(databaseUrl);
+console.log(`[migrate] tls_forzado=${prepared.ssl}`);
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const sqlPath = path.join(here, "..", "db", "init.sql");
@@ -40,15 +64,13 @@ function degradedSql(sql) {
 }
 
 const pool = new pg.Pool({
-  connectionString: databaseUrl,
+  connectionString: prepared.url,
   max: 2,
   // Fail-fast: en vez de esperar en silencio si el TCP no llega
   connectionTimeoutMillis: 15_000,
   idleTimeoutMillis: 10_000,
-  // Las bases de datos gestionadas exigen TLS (pg_hba "no encryption")
-  ...((process.env.DATABASE_SSL ?? "").toLowerCase() === "true"
-    ? { ssl: { rejectUnauthorized: false } }
-    : {}),
+  // Complemento defensivo por si la sslmode de la URL se pierde
+  ...(prepared.ssl ? { ssl: { rejectUnauthorized: false } } : {}),
 });
 pool.on("error", (error) => {
   console.error(`[migrate] cliente inactivo con error: ${error.message}`);

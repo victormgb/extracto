@@ -1,6 +1,30 @@
 import { Pool } from "pg";
 import type { DocumentDTO, DocumentType } from "@/lib/types";
 
+/**
+ * Fuerza TLS en la conexión cuando el host es una BD gestionada (Seenode) o
+ * DATABASE_SSL=true. Se hace EN LA URL porque el parser de `pg` hace
+ * `Object.assign(config, parse(connectionString))` y la `sslmode` de la URL
+ * pisaría cualquier objeto `ssl` pasado por configuración.
+ * `sslmode=no-verify` se traduce en TLS con rejectUnauthorized=false.
+ */
+export function withPlatformSsl(connectionString: string): string {
+  try {
+    const url = new URL(connectionString);
+    const isManaged = url.hostname.endsWith(".run-on-seenode.com");
+    const forced = (process.env.DATABASE_SSL ?? "").toLowerCase() === "true";
+    if (isManaged || forced) {
+      url.searchParams.delete("sslmode");
+      url.searchParams.delete("ssl");
+      url.searchParams.set("sslmode", "no-verify");
+      return url.toString();
+    }
+  } catch {
+    /* URL no parseable: se usa tal cual */
+  }
+  return connectionString;
+}
+
 // Pool perezoso: no abre conexiones hasta la primera query,
 // por lo que `next build` no necesita la base de datos levantada.
 const globalForPool = globalThis as unknown as { extractoPool?: Pool };
@@ -15,12 +39,12 @@ export function getPool(): Pool {
 
   if (!globalForPool.extractoPool) {
     // Las bases de datos gestionadas (p. ej. Seenode) exigen conexión cifrada:
-    // DATABASE_SSL=true añade TLS sin verificar la CA del certificado.
+    // DATABASE_SSL=true (o el propio host) añade TLS sin verificar la CA.
     const useSsl =
       (process.env.DATABASE_SSL ?? "").toLowerCase() === "true";
 
     globalForPool.extractoPool = new Pool({
-      connectionString,
+      connectionString: withPlatformSsl(connectionString),
       max: 10,
       ...(useSsl ? { ssl: { rejectUnauthorized: false } } : {}),
     });
