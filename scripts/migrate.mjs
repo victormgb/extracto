@@ -45,6 +45,10 @@ const pool = new pg.Pool({
   // Fail-fast: en vez de esperar en silencio si el TCP no llega
   connectionTimeoutMillis: 15_000,
   idleTimeoutMillis: 10_000,
+  // Las bases de datos gestionadas exigen TLS (pg_hba "no encryption")
+  ...((process.env.DATABASE_SSL ?? "").toLowerCase() === "true"
+    ? { ssl: { rejectUnauthorized: false } }
+    : {}),
 });
 pool.on("error", (error) => {
   console.error(`[migrate] cliente inactivo con error: ${error.message}`);

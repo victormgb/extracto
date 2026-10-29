@@ -14,9 +14,15 @@ export function getPool(): Pool {
   }
 
   if (!globalForPool.extractoPool) {
+    // Las bases de datos gestionadas (p. ej. Seenode) exigen conexión cifrada:
+    // DATABASE_SSL=true añade TLS sin verificar la CA del certificado.
+    const useSsl =
+      (process.env.DATABASE_SSL ?? "").toLowerCase() === "true";
+
     globalForPool.extractoPool = new Pool({
       connectionString,
       max: 10,
+      ...(useSsl ? { ssl: { rejectUnauthorized: false } } : {}),
     });
   }
 
