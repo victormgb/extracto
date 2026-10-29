@@ -294,6 +294,39 @@ db/init.sql                       # Esquema inicial (+ migración idempotente)
 | `EMBED_DIMS`     | Dimensiones esperadas de la columna       | `1536`                                   |
 | `OPENROUTER_BASE_URL` | Base URL alternativa (proxy/mock)      | `https://openrouter.ai/api/v1`              |
 
+## Despliegue en Seenode
+
+El proyecto está desplegado en **<https://extracto.seenode.app>** (proyecto
+Seenode `extracto`, app `975432`, BD `extracto-db` `7934776`, PostgreSQL 18.6
+en Frankfurt, tier freemium + prueba).
+
+- **Código**: GitHub `victormgb/extracto` (rama `main`); cada push puede
+  desplegarse con `create_deployment` (autoDeploy desactivado).
+- **Build**: `npm ci && npm run build` · **Run**:
+  `node scripts/migrate.mjs && npm start -- -H 0.0.0.0 -p 3000` (puerto3000).
+- **Migración**: `scripts/migrate.mjs` se ejecuta **en cada arranque** (es
+  idempotente): aplica `db/init.sql` (pgvector + tablas). Si la imagen
+  gestionada no tuviera pgvector, degrada (`embedding text`) en vez de tumbar
+  el arranque. Sin `DATABASE_URL` se omite.
+- **Base de datos enlazada** con `link_database_to_application` → variables
+  secretas `DATABASE_URL/HOST/PORT/USER/PASSWORD/NAME`.
+- **TLS obligatorio**: el `pg_hba` de Seenode exige cifrado
+  (`no encryption` rechaza conexiones planas). `withPlatformSsl()` fuerza
+  `sslmode=no-verify` **dentro de la URL** porque el parser de `pg` pisa el
+  objeto `ssl` de la configuración con el de la query string.
+  `DATABASE_SSL=true` está puesto en la app por si acaso.
+- **Secretos**: `OPENROUTER_API_KEY` y `DATABASE_*` son variables secretas
+  (write-only) en Seenode; `.env` no se sube a git.
+- **Volumen**: `/data` (5 GB) con `UPLOAD_DIR=/data/uploads` para los
+  archivos subidos persistentes.
+- **Variables de la app**: `EXTRACT_MODEL`, `EXTRACT_MAX_PDF_PAGES`,
+  `EMBED_MODEL`, `EMBED_DIMS`, `UPLOAD_DIR`, `MAX_UPLOAD_MB`.
+- **Dominio**: `extracto.seenode.app` (dominio por defecto `*.seenode.app`).
+
+Verificación tras desplegar (9/9 OK): `GET /`201… subida de PDF → extracción
+real con DeepSeek → confirmar (document_data + embedding pgvector) → chat SQL
+y semántico con fuentes → `DELETE` limpio.
+
 ## Comandos útiles
 
 ```bash
